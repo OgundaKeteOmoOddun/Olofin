@@ -1,0 +1,15 @@
+Get-Mailbox -ResultSize Unlimited -RecipientTypeDetails UserMailbox,SharedMailbox | Get-MailboxStatistics | Sort-Object lastlogontime -Descending | Select-Object –First <number> -Property DisplayName,LastLogonTime
+
+get-mailbox | get-mailboxstatistics | select DisplayName,ItemCount,TotalItemSize | export-csv "c:\MailboxSizes.csv"
+
+Add-PSSnapin Microsoft.Exchange.Management.PowerShell.Admin
+
+foreach($user in (Get-Mailbox).alias){
+  
+  $mailboxdata = Get-Mailbox -Identity $user -ResultSize Unlimited | get-mailboxstatistics | Select-Object DisplayName,ItemCount,TotalItemSize 
+  $addata      = Get-ADUser  -Identity $user -Properties office,description | Select-Object office,description
+    
+  Write-Output ($($mailboxdata.DisplayName) +"~"+ $($addata.office)+"~"+ $($mailboxdata.ItemCount)+"~"+$($mailboxdata.TotalItemSize)+"~"+$($addata.description)) |
+  Out-File c:\outfile.txt -Append -Force
+      
+}

@@ -1,0 +1,5 @@
+﻿Get-ADComputer -Filter {lastlogondate -lt “3/26/2020”} -Properties lastlogondate | select Name,LastLogonDate | sort LastLogonDate | Out-File C:\ComputerLastLogon.csv
+
+Get-ADUser -LDAPFilter "(&(objectCategory=person)(objectClass=user)(!userAccountControl:1.2.840.113556.1.4.803:=2))"
+
+Get-ADUser -Filter 'enabled -eq $true' |fl name | Out-File C:\ComputerLastLogon.csv
