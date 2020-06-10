@@ -1,0 +1,3 @@
+ $Host.UI.RawUI.WindowTitle="Alex From MITRE!" | Alex Robles | MVP PowerShell
+ set-location -Path C:\Users\marvin.a.robles.ctr\desktop\Alex_From_MITRE!_ISE.ps1
+ Clear-Host

@@ -1,0 +1,570 @@
+Param(
+       $LocalArchive = "LogsArchiveLocal", 
+       $NetworkArchive,
+       $List,
+       $Computers,
+	   [switch]$Listlogons,
+       [switch]$Localhost,
+       [switch]$Clear,
+       [switch]$Help
+     )
+	 
+Function Test-ComputerConnection
+{
+	HtmlHeader
+	ForEach($Computer in $Computers)
+	{
+		#Ping the computer
+		$Result = Get-WmiObject -Class win32_pingstatus -Filter "address='$computer'"
+		#If the ping succeeds...
+		If($Result.Statuscode -eq 0)
+		{
+			#...and it's not a blank name...
+			if($computer.length -ge 1) 
+			{ 
+				Write-Host "+ Processing $Computer" -foregroundcolor "green"
+				#Call the main functions
+				$ErrorActionPreference = "silentlycontinue"
+				HtmlSummary
+				$ErrorActionPreference = "continue"
+				BackupnClear-EventLogs
+			}
+		}
+			#If the ping fails, skip the computer
+		else
+		{ 
+		Write-Host "- $computer is inaccessible; skipping" -foregroundcolor "red"
+		Write-Host
+		}
+	}
+	HtmlFooter
+	Invoke-Item $outfile
+}
+
+Function HtmlHeader
+{
+	$currentdate = Get-Date -format g
+	ConvertTo-HTML -Title "Event Log Summary" -Body "<center><img src=$nduimg><br><font color=#005596><b> Systems Audit</b><br>Report generated $currentdate</font></center>" >> $outfile
+}
+
+Function HtmlFooter
+{
+	ConvertTo-HTML -Body "<p><center><i>For internal NDU use only.</i></center>" >> $outfile
+}
+
+Function HtmlSummary
+{	
+	$filter_logclear = "
+	<QueryList>
+	<Query Id='0' Path='Security'>
+	<Select Path='Security'>*[System[(EventID=1102)]]</Select>
+	</Query>
+	</QueryList>
+	"
+	#Grab the timestamp when the log was last cleared
+	$secevents = get-winevent -ComputerName $Computer -LogName Security -FilterXPath $filter_logclear -Oldest
+	$secevents_time = $secevents | select timecreated -ExpandProperty timecreated
+	if (!($secevents_time)) {
+		ConvertTo-HTML -Body "$styleblack $stylered <div id = 'blacktext'><br><h2><u>$Computer</u></h2><i><b>Unable to determine when the log was last cleared</b></i>" >> $outfile
+		}
+	else {
+		ConvertTo-HTML -Body "$styleblack $stylered <div id = 'blacktext'><br><h2><u>$Computer</u></h2><i><b>Period beginning $secevents_time</b></i>" >> $outfile
+		}
+	
+	#All logons
+	$filter_logons = "
+		<QueryList>
+		<Query Id='0' Path='Security'>
+		<Select Path='Security'>*[System[(EventID=4624)]] and *[EventData[Data[@Name='LogonType'] = '2']]</Select>
+		<Select Path='Security'>*[System[(EventID=4624)]] and *[EventData[Data[@Name='LogonType'] = '7']]</Select>
+		<Suppress Path='Security'>*[EventData[Data[@Name='LogonGUID'] = '{00000000-0000-0000-0000-000000000000}']]</Suppress>
+		</Query>
+		</QueryList>
+		"
+	$events = Get-WinEvent -Computer $computer -LogName Security -FilterXPath $filter_logons
+	
+	#List the number of successful logins
+	$numlogons = $events | measure
+	$numlogons = $numlogons.count
+	ConvertTo-HTML -Body "<i><b>There have been $numlogons successful logons in this period</b></i><p>" >> $outfile
+	
+	#If the -listlogons switch is present, list all successful logons...
+	if($Listlogons) {
+		$events | Select @{n="Time";e={$_.timecreated}}, @{n="User";e={$_.properties[5].Value}} | ConvertTo-HTML -PreContent '<h3>Succesful logon(s)</h3>' >> $outfile
+		#...and logoffs
+		$filter_logoffs = "
+			<QueryList>
+			<Query Id='0' Path='Security'>
+			<Select Path='Security'>*[System[(EventID=4647)]]</Select>
+			</Query>
+			</QueryList>
+			"
+		$events | Select @{n="Time";e={$_.timecreated}}, @{n="User";e={$_.properties[5].Value}} | ConvertTo-HTML -PreContent '<h3>Logoff(s)</h3>' >> $outfile
+		write-host "Listing all successful logons"
+	}
+	
+	#Failed type 2 and 7 logons
+	$filter_faillogon = "
+		<QueryList>
+		<Query Id='0' Path='Security'>
+		<Select Path='Security'>*[System[(EventID=4625)]] and *[EventData[Data[@Name='LogonType'] = '2']]</Select>
+		<Select Path='Security'>*[System[(EventID=4625)]] and *[EventData[Data[@Name='LogonType'] = '7']]</Select>
+		</Query>
+		</QueryList>
+		"
+	$events = Get-WinEvent -Computer $computer -LogName Security -FilterXPath $filter_faillogon | Select @{n="Time";e={$_.timecreated}}, @{n="User";e={$_.properties[5].Value}} | `
+	ConvertTo-HTML -PreContent '<h3>Failed logon(s)</h3><div id = "redtext">' >> $outfile
+	
+	#New accounts
+	$filter_users = "
+		<QueryList>
+		<Query Id='0' Path='Security'>
+		<Select Path='Security'>*[System[(EventID=4720)]]</Select>
+		</Query>
+		</QueryList>
+		"
+	Get-WinEvent -Computer $computer -LogName Security -FilterXPath $filter_users | Select @{n="Time";e={$_.timecreated}}, @{n="User name";e={$_.properties[0].Value}} | ConvertTo-HTML `
+	-PreContent "<h3>New user account(s) created</h3>" >> $outfile
+	
+	#Password changes/resets
+	$filter_password = "
+		<QueryList>
+		<Query Id='0' Path='Security'>
+		<Select Path='Security'>*[System[(EventID=4723)]]</Select>
+		<Select Path='Security'>*[System[(EventID=4724)]]</Select>
+		</Query>
+		</QueryList>
+		"
+	Get-WinEvent -Computer $computer -LogName Security -FilterXPath $filter_password | Select @{n="Time";e={$_.timecreated}}, @{n="User";e={$_.properties[0].Value}} | ConvertTo-HTML `
+	-PreContent "<h3>Password change(s)</h3>" >> $outfile
+	
+	#Account locks/unlocks
+	$filter_lock_unlock = "
+		<QueryList>
+		<Query Id='0' Path='Security'>
+		<Select Path='Security'>*[System[(EventID=4740)]]</Select>
+		<Select Path='Security'>*[System[(EventID=4767)]]</Select>
+		</Query>
+		</QueryList>
+		"
+	Get-WinEvent -Computer $computer -LogName Security -FilterXPath $filter_lock_unlock | Select @{n="Time";e={$_.timecreated}}, Message | ConvertTo-HTML `
+	-PreContent "<h3>Account lock/unlock(s)</h3>" >> $outfile
+	
+	#Accounts enabled/disabled/deleted
+	$filter_enabled_disabled = "
+		<QueryList>
+		<Query Id='0' Path='Security'>
+		<Select Path='Security'>*[System[(EventID=4722)]]</Select>
+		<Select Path='Security'>*[System[(EventID=4725)]]</Select>
+		<Select Path='Security'>*[System[(EventID=4766)]]</Select>
+		</Query>
+		</QueryList>
+		"
+	Get-WinEvent -Computer $computer -LogName Security -FilterXPath $filter_enabled_disabled | Select @{n="Time";e={$_.timecreated}}, Message | ConvertTo-HTML `
+	-PreContent "<h3>Account(s) disabled/enabled/deleted</h3>" >> $outfile
+	
+	#System security access granted to accounts
+	$filter_systemaccess = "
+		<QueryList>
+		<Query Id='0' Path='Security'>
+		<Select Path='Security'>*[System[(EventID=4717)]]</Select>
+		</Query>
+		</QueryList>
+		"
+	Get-WinEvent -Computer $computer -LogName Security -FilterXPath $filter_systemaccess | Select @{n="Time";e={$_.timecreated}}, @{n="User";e={$_.properties[1].Value}}, `
+	@{n="New permission";e={$_.properties[5].Value}} | ConvertTo-HTML -PreContent "<h3>Permissions granted to account(s)</h3>" >> $outfile
+	
+	#User changes
+	$filter_userchange = "
+		<QueryList>
+		<Query Id='0' Path='Security'>
+		<Select Path='Security'>*[System[(EventID=4738)]]</Select>
+		</Query>
+		</QueryList>
+		"
+	Get-WinEvent -Computer $computer -LogName Security -FilterXPath $filter_userchange | Select @{n="Time";e={$_.timecreated}}, @{n="User";e={$_.properties[1].Value}} | ConvertTo-HTML `
+	-PreContent "<h3>User property changes(s)</h3>" >> $outfile
+	
+	#New groups
+	$filter_groups = "
+		<QueryList>
+		<Query Id='0' Path='Security'>
+		<Select Path='Security'>*[System[(EventID=4727)]]</Select>
+		<Select Path='Security'>*[System[(EventID=4731)]]</Select>
+		</Query>
+		</QueryList>
+		"
+	Get-WinEvent -Computer $computer -LogName Security -FilterXPath $filter_groups | Select @{n="Time";e={$_.timecreated}}, @{n="Group name";e={$_.properties[0].Value}} | ConvertTo-HTML `
+	-PreContent "<h3>New group(s) created</h3>" >> $outfile
+	
+	#Groups deleted
+	$filter_groupsdelete = "
+		<QueryList>
+		<Query Id='0' Path='Security'>
+		<Select Path='Security'>*[System[(EventID=4730)]]</Select>
+		</Query>
+		</QueryList>
+		"
+	Get-WinEvent -Computer $computer -LogName Security -FilterXPath $filter_groupsdelete | Select @{n="Time";e={$_.timecreated}}, @{n="Group name";e={$_.properties[0].Value}} | ConvertTo-HTML `
+	-PreContent "<h3>Group(s) removed</h3>" >> $outfile
+	
+	#Group changes
+	$filter_groupchange = "
+		<QueryList>
+		<Query Id='0' Path='Security'>
+		<Select Path='Security'>*[System[(EventID=4735)]]</Select>
+		<Select Path='Security'>*[System[(EventID=4737)]]</Select>
+		</Query>
+		</QueryList>
+		"
+	Get-WinEvent -Computer $computer -LogName Security -FilterXPath $filter_groupchange | Select @{n="Time";e={$_.timecreated}}, @{n="Group";e={$_.properties[0].Value}} `
+	| ConvertTo-HTML -PreContent "<h3>Group property changes(s)</h3>" >> $outfile
+	
+	#Users added to groups
+	$filter_usersgroups = "
+		<QueryList>
+		<Query Id='0' Path='Security'>
+		<Select Path='Security'>*[System[(EventID=4728)]]</Select>
+		<Select Path='Security'>*[System[(EventID=4729)]]</Select>
+		<Select Path='Security'>*[System[(EventID=4732)]]</Select>
+		</Query>
+		</QueryList>
+		"
+	Get-WinEvent -Computer $computer -LogName Security -FilterXPath $filter_usersgroups | Select @{n="Time";e={$_.timecreated}}, @{n="Group";e={$_.properties[2].Value}}, `
+	@{n="User";e={$_.properties[6].Value}} | ConvertTo-HTML -PreContent "<h3>User(s) added to group(s)</h3>" >> $outfile
+	
+	#Users removed from groups
+	$filter_usersgroups_removed = "
+		<QueryList>
+		<Query Id='0' Path='Security'>
+		<Select Path='Security'>*[System[(EventID=4728)]]</Select>
+		<Select Path='Security'>*[System[(EventID=4729)]]</Select>
+		<Select Path='Security'>*[System[(EventID=4732)]]</Select>
+		</Query>
+		</QueryList>
+		"
+	Get-WinEvent -Computer $computer -LogName Security -FilterXPath $filter_usersgroups_removed | Select @{n="Time";e={$_.timecreated}}, @{n="Group";e={$_.properties[2].Value}}, `
+	@{n="User";e={$_.properties[6].Value}} | ConvertTo-HTML -PreContent "<h3>User(s) removed from group(s)</h3>" >> $outfile
+	
+	#Disc burn operations
+	$filter_discburn = "
+		<QueryList>
+		<Query Id='0' Path='System'>
+		<Select Path='System'>*[System[(EventID=133)]]</Select>
+		</Query>
+		</QueryList>
+		"
+	Get-WinEvent -Computer $computer -LogName System -FilterXPath $filter_discburn | Select @{n="Time";e={$_.timecreated}}, @{n="Device";e={$_.properties[0].Value}} | ConvertTo-HTML `
+	-PreContent "<h3>Disc burn operation(s)</h3>" >> $outfile
+	
+	#Printer operations
+	$filter_printer = "
+		<QueryList>
+		<Query Id='0' Path='Microsoft-Windows-PrintService/Operational'>
+		<Select Path='Microsoft-Windows-PrintService/Operational'>*[System[(EventID=307)]]</Select>
+		</Query>
+		</QueryList>
+		"
+	Get-WinEvent -Computer $computer -LogName Microsoft-Windows-PrintService/Operational -FilterXPath $filter_printer | Select @{n="Time";e={$_.timecreated}}, Message | ConvertTo-HTML `
+	-PreContent "<h3>Printer operation(s)</h3>" >> $outfile
+	
+	#Print fails
+	$filter_printer = "
+		<QueryList>
+		<Query Id='0' Path='Microsoft-Windows-PrintService/Operational'>
+		<Select Path='Microsoft-Windows-PrintService/Operational'>*[System[(EventID=353)]]</Select>
+		</Query>
+		</QueryList>
+		"
+	Get-WinEvent -Computer $computer -LogName Microsoft-Windows-PrintService/Operational -FilterXPath $filter_printer | Select @{n="Time";e={$_.timecreated}}, Message | ConvertTo-HTML `
+	-PreContent "<h3>Print failures due to insufficient permissions(s)</h3>" >> $outfile
+	
+	#Applocker/SRP blocks
+	$filter_applocker = "
+			<QueryList>
+			<Query Id='0' Path='Application'>
+			<Select Path='Application'>*[System[(EventID=8004)]]</Select>
+			<Select Path='Application'>*[System[(EventID=865)]]</Select>
+			</Query>
+			</QueryList>
+			"
+	Get-WinEvent -Computer $computer -LogName Application -FilterXPath $filter_applocker | ConvertTo-HTML -PreContent '<h3>AppLocker & software restriction blocks</h3> <div id = "redtext">' >> $outfile
+	
+	#EMET/SEP events
+	$filter_emet_sep = "
+		<QueryList>
+		<Query Id='0' Path='Application'>
+		<Select Path='Application'>*[System[Provider[@Name='EMET' or @Name='Symantec AntiVirus'] and (Level=1  or Level=2) and (EventID=1 or EventID=2 or EventID=51)]]</Select>
+		</Query>
+		</QueryList>
+		"
+	Get-WinEvent -Computer $computer -LogName Application -FilterXPath $filter_emet_sep | Select @{n="Time";e={$_.timecreated}}, Message | ConvertTo-HTML -PreContent '<h3>EMET & SEP detections</h3><div id = "redtext">' >> $outfile
+	
+	#System time changes
+	$filter_time = "
+		<QueryList>
+		<Query Id='0' Path='Security'>
+		<Select Path='Security'>*[System[(EventID=4616)]]</Select>
+		</Query>
+		</QueryList>
+		"
+	Get-WinEvent -Computer $computer -LogName Security -FilterXPath $filter_time | Select @{n="Time";e={$_.timecreated}}, Message | ConvertTo-HTML -PreContent '<h3>System time changes</h3><div id = "redtext">' >> $outfile
+
+	#Audit policy changes
+	$filter_audits = "
+		<QueryList>
+		<Query Id='0' Path='Security'>
+		<Select Path='Security'>*[System[(EventID=4715)]]</Select>
+		<Select Path='Security'>*[System[(EventID=4719)]]</Select>
+		<Select Path='Security'>*[System[(EventID=4912)]]</Select>
+		<Select Path='Security'>*[System[(EventID=4906)]]</Select>
+		<Select Path='Security'>*[System[(EventID=4905)]]</Select>
+		</Query>
+		</QueryList>
+		"
+	Get-WinEvent -Computer $computer -LogName Security -FilterXPath $filter_audits | Select @{n="Time";e={$_.timecreated}}, Message | ConvertTo-HTML -PreContent '<h3>Audit policy changes</h3><div id = "redtext">' >> $outfile
+	
+	#Administrative logons
+	$filter_adminlogon = "
+		<QueryList>
+		<Query Id='0' Path='Security'>
+		<Select Path='Security'>*[System[(EventID=4672)]] and *[EventData[Data[@Name='LogonType'] = '2']]</Select>
+		<Select Path='Security'>*[System[(EventID=4672)]] and *[EventData[Data[@Name='LogonType'] = '7']]</Select>
+		<Suppress Path='Security'>*[EventData[Data[@Name='SubjectUserSid'] = 'S-1-5-18']]</Suppress>
+		<Suppress Path='Security'>*[EventData[Data[@Name='SubjectUserSid'] = 'S-1-5-19']]</Suppress>
+		<Suppress Path='Security'>*[EventData[Data[@Name='SubjectUserSid'] = 'S-1-5-20']]</Suppress>
+		</Query>
+		</QueryList>
+		"
+	Get-WinEvent -Computer $computer -LogName Security -FilterXPath $filter_adminlogon | Select @{n="Time";e={$_.timecreated}}, @{n="User";e={$_.properties[1].Value}} | ConvertTo-HTML -PreContent '<h3>User logons with admin privileges</h3><div id = "redtext">' >> $outfile
+	
+	#Event log events
+	$filter_eventlog = "
+		<QueryList>
+		<Query Id='0' Path='Security'>
+		<Select Path='Security'>*[System[(EventID=1102)]]</Select>
+		<Select Path='Security'>*[System[(EventID=1104)]]</Select>
+		<Select Path='Security'>*[System[(EventID=1108)]]</Select>
+		</Query>
+		</QueryList>
+		"
+	Get-WinEvent -Computer $computer -LogName Security -FilterXPath $filter_eventlog | Select @{n="Time";e={$_.timecreated}}, Message | ConvertTo-HTML -PreContent '<h3>Event log meta events</h3><div id = "redtext">' >> $outfile
+	
+	#System startups
+	$filter_startup = "
+		<QueryList>
+		<Query Id='0' Path='System'>
+		<Select Path='System'>*[System[(EventID=6005)]]</Select>
+		</Query>
+		</QueryList>
+		"
+	Get-WinEvent -Computer $computer -LogName Security -FilterXPath $filter_startup | Select @{n="Time";e={$_.timecreated}} | ConvertTo-HTML -PreContent '<h3>System startups</h3><div id = "redtext">' >> $outfile
+	
+	#System shutdowns
+	$filter_shutdown = "
+		<QueryList>
+		<Query Id='0' Path='System'>
+		<Select Path='System'>*[System[(EventID=6006)]]</Select>
+		</Query>
+		</QueryList>
+		"
+	Get-WinEvent -Computer $computer -LogName Security -FilterXPath $filter_shutdown | Select @{n="Time";e={$_.timecreated}} | ConvertTo-HTML -PreContent '<h3>System shutdowns</h3><div id = "redtext">' >> $outfile
+
+}
+
+Function BackupnClear-EventLogs
+{
+	#Create a variable with the current datetime and computer name
+	$folder = "{1}-Logs-{0:yyyyMMdd}_T{0:HHmm}" -f [DateTime]::now,$computer
+	
+	#Case for localhost
+
+	If ($Localhost.IsPresent)
+	{
+		#If local log folder doesn't exist...
+		If(!(Test-Path "C:\$LocalArchive\$folder"))
+		{
+			#...create it
+			New-Item "C:\$LocalArchive\$folder" -type Directory -force | out-Null
+		}
+	}
+	#Case for networked computers
+	else {
+		#If local log folder doesn't exist...
+		If(!(Test-Path "\\$computer\c$\$LocalArchive\$folder"))
+		{
+			#...create it
+			New-Item "\\$computer\c$\$LocalArchive\$folder" -type Directory -force | out-Null
+		}
+	}
+	
+	#Create an array with the names of the event logs
+	$EventLogArray = @("Application","Security","System","Microsoft-Windows-PrintService/Operational")
+	foreach($log in $EventLogArray)
+	{
+		#Stupid extra conditions because the print log name contains an invalid filesystem character
+		if ($log -eq 'Microsoft-Windows-PrintService/Operational')
+			{$log2 = "Print"}
+		if ($log -eq 'System')
+			{$log2 = "System"}
+		if ($log -eq 'Security')
+			{$log2 = "Security"}
+		if ($log -eq 'Application')
+			{$log2 = "Application"}
+		
+		write-host "$log2..." -nonewline
+		
+		#If the -clear switch is present...
+		#Case for localhost
+		if ($Localhost.IsPresent)
+		{
+			if ($Clear.IsPresent)
+			{
+				#Call wevtutil and tell it to clear and backup the logs
+				wevtutil cl $log /bu:C:\$LocalArchive\$folder\$log2.evtx /remote:$computer
+			}
+			else
+			{
+				#If the -clears switch isn't present, just backup (export) the logs
+				wevtutil epl $log C:\$LocalArchive\$folder\$log2.evtx /remote:$computer
+			}
+		}
+		else
+		{
+			#Case for networked computers
+			if ($Clear.IsPresent)
+			{
+				#Call wevtutil and tell it to clear and backup the logs
+				wevtutil cl $log /bu:\\$computer\c$\$LocalArchive\$folder\$log2.evtx /remote:$computer
+			}
+			else
+			{
+				#If the -clears switch isn't present, just backup (export) the logs
+				wevtutil epl $log \\$computer\c$\$LocalArchive\$folder\$log2.evtx /remote:$computer
+			}
+		}
+		
+        if($LastExitCode -ne 0)
+        {
+			#If there were any errors, print failure
+			write-host "FAIL" -foreground "red"
+        }
+        else 
+        {
+			#If there weren't any errors, print success
+            write-host "OK" -foreground "green"
+        }
+    }
+       if($NetworkArchive)
+       {
+            if(!(Test-Path "$networkarchive\$weekdate"))
+            {
+                 New-Item "$networkArchive\$weekdate" -type Directory -force | out-Null
+        }
+		write-host "Network backup..." -nonewline
+		try {
+			Copy-Item -path \\$computer\c$\$LocalArchive\$folder -Destination $NetworkArchive\$WeekDate\ -Recurse
+			write-host "OK" -foregroundcolor "green"
+			}
+		catch {
+			write-host "FAIL" -foregroundcolor "red"
+			}
+       }
+	write-host
+}
+
+Function Get-HelpText
+{
+ $helpText= `
+@"
+ DESCRIPTION:
+ NAME: SSA.ps1  - "SystemAudit"
+ This script will backup, archive, and clear the event logs on 
+ both local and remote computers. It will accept a computer name
+ or read a text file for the list of computers. 
+
+ PARAMETERS: 
+ -LocalArchive - local collection of all computer event logs. This defaults to "C:\LogsArchiveLocal"
+ -NetworkArchive - UNC path of network archive location.
+ -List - path to a text file of computer names to process. One computer name per line
+ -Computers -  one or more computer names typed in on the command line
+ 
+ SWITCHES:
+ -Localhost - switch that runs script against local computer only
+ -Listlogons - list all successful logons and logoffs
+ -Clear - switch that causes script to empty the event log if the backup succeeds
+ -Help - displays this help topic
+
+ SYNTAX:
+ SSA.ps1 -LocalHost 
+
+ Backs up all event logs on local computer. Archives them to C:\LogsArchiveLocal.
+
+ SSA.ps1 -AD -Clear
+
+ Searches AD for all computers. Connects to these computers, and backs up all event 
+ logs. Archives all event logs to each computer at C:\LogsArchiveLocal. It then clears all event logs 
+ if the backup operation was successful. 
+
+ SSA.ps1 -List C:\fso\ListOfComputers.txt
+
+ Reads the ListOfComputers.txt file to obtain a list of computers. Connects to these 
+ computers, and backs up all event logs. Archives all event logs to C:\LogsArchiveLocal. 
+
+ SSA.ps1 -Computers "Workstation1,Server2" -NetworkArchive "\\Server2\C$\fso\Audit_Logs"
+
+ Connects to remote computers named Workstation1 and Server2, and backs up all event 
+ logs. Archives all event logs from all computers to the path c:\fso\Audit_Logs directory on 
+   a remote computer named Server2. 
+
+SSA.ps1 -help
+
+Prints the help topic for the script
+"@ #end helpText
+  $helpText
+}
+
+# *** Entry Point To Script ***
+
+	Write-Host
+	Write-Host "--------------------" -Fore "cyan"
+	Write-Host "   SYSTEMS AUDIT" -Fore "cyan"
+	Write-Host "--------------------" -Fore "cyan"
+	Write-Host
+	Write-Host "Version 2019.4.13" -Fore "cyan"
+	Write-Host
+	
+	#Check for admin privileges
+	If (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(`
+    [Security.Principal.WindowsBuiltInRole] "Administrator"))
+	{
+    Write-Warning "You do not have Administrator rights to run this script!`nPlease re-run this script as an Administrator!"
+    Break
+	}
+
+$mitreimg = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIQAAAAmCAYAAAAFkDNCAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAgY0hSTQAAeiYAAICEAAD6AAAAgOgAAHUwAADqYAAAOpgAABdwnLpRPAAAAAlwSFlzAAAOxAAADsQBlSsOGwAABptJREFUeF7tnH1MVWUcxx/7oyzTUsAEFASEYEnixCJNieVcGbVetHAzR2uLqMzN5Wa6tWrhbG5tZmWuXK7+kFpZY0TNXogcRQnDQgeBgKCAyYuV2ds/5vfwu5d773me33PugXsu514+2939PTAunHO+5/f6HCZdvISYYALiMnqfYAID1kPUHGkTt+38klb+PJA6XXy4o4hW9vjrn//ElPX7aGWma9dDIil+Bq3MfFpzTBS+fphW/gzsfVjETL/asCc9uMd4H2u+2bxC5C9OH5PPfzwnXhQunSfS5sSKzNRZ9FUzY30sW5eliLINd9BK4yH6+v8gy8xHHedES8cZWtmj+odWsuT0D54nK/J582ifIe6sLR+L0u2fjPrc2oUVRFN7P1lyvm3oIMselbUnyJLT1j1AVnQBcUAY8IBOwwqi+jiv0v1ftRpu3w64A3DgHDpBRjrwGE6LQimIwXN/iu+H/qaVHHz/SFMXrYLDinfRCTIagCiQyzmFUhAnewbJ4in/4jhZ1oFXgXfRAcFBmNHOs/tqbXviYFFWGVwGH4iuGgiEq14CqX9ulVg0P5lW/litMjgguNiS92jlz941C8Rja5bQSo0q8w/M4FU0HOsSb1c0siHUcx5G+7t0KD1Ec6f1+P1dYydZ1jhU106WnjNRUGngQu/Zeq9xUVU4lWArBVHX8itZel6taCJLD+7I7YetCygYYbqdTetuJcuMUwm2VBCIV+gzWAWx3mriU/fzSbKscbDOXtLqRhDi0PCT8UvPb2SFFqkgunuHyLKO1TBQdqCeLGtAbE4lVOOBuGmTyQoPUkG0nwo+XiEM6CoCJE+6UlZG8wm+XxFJ/NTtjCdQIRVEz1l1y5pDFw6q6+11NqMhsQQIu6ob5vrEa8kKLVJBNLadJcvMLTOuJMsMFw7g9jdXtdDKDPe50ZBYwntypXh2WhxZoUUqCK4e3rY2lywzUDcOTAY3yIIYuM9t7/2dLPeBGwH9Eu6FYVbui1X0E3JyMhPJCi2mxlR335BI3vg+rcxcePdRsf75g8oqZOeqTPFMcQGtRli9pZz9mcLlWcZARwV+71WTL6fVMDiZ470xhVJS9flW8W06jfX4O/AYTR6i87S6ZY2ZPS7KI3fOp6+YQVgIrAowyOLK2ILcVJGUwHc67VQ+kULJ6pvICj0mQXB7INISrjHe826ca7yrCAwP3CAL4QKdOghNVYMDO5VPJNC8476gxgKjxSSI00yFkZUynNjAFXNt1nc+GxnZwltwg6yn78km65LQMq8jy4zdyset4ObAjIjbPRUKTILgOoOzYqaSJcTKvDSyzPjupsJ4nOs9LFk4IiyP4GRwlU+kUfnkMmN7opOewYOfIHA3cxcva148WUIszk5mS0VPmOA6mMhJfA/aV3CB6DbTuBmcB4gAezQvflAq7spX52ihxk8QXEcQF983y4d9f558LA0QJlCxcIMsbCr1ZW5iDFly8HluA+EVF1wFRIBJJ0SADbt2QQiHmIJ9BVZRfoLgOoKyi4/qQAU8TdELFbSSU3BzBlnD4ORxXqeptZcsd/FS6QrlcaEZNZ6E7u8hmI7g7JnTyBoB1QF3Abnwg95DYF8BFNygTqLOX/iXLHcBoe9+ytyb8bBp1yFTqR4u/ATBdQTTk2LJ8se3SggGlXfhWrQ1R0+R5T5w86AJJANJeNlbX9MqvHgFAYVyiVucIuHzrRKsAq+CEyQjPs7siTyEexI4WtbdnavstSDXKq9qoFX48ApigBld4wKqSiB8nUuaZHBeJWW2OrFECHJjYukBIfKVjStpZWbt/h+VsyCn8AqCS9gWJPGj18BqQQc3qNHV3lxr3Q3g+FBiqsCQK5yi9wqCS9jyc+aQJSewWuCAy9R13ziPw7XW3QJKTCTVKsKZZHoFwSVsXFwHcIXcAfrCDcY8cAKMlKe5nihaqswnkGS+UV5LK2fxCoJL2Li47oHrSfiiG4yBqVOuIMtMpDzNpcsnMDUOJslEUorReLCvbbs/p08YxhAEYhbXM9DFdaDrSQB006zsUcjOSCDLDP7OSHmaS5dPhCPJNATBPXYfTAWh60lwAzFfYjWisfqYoRtAPsGd4w2vVTt6AxiC4J4KWpg+kyw9XPUA74GBmBXgTrmTFGn/JoBrbcMjlrxc6ViSaQiC2wORKGlZq0D1oEqUim/PkLaqVXg248jg/l43omttO5lkGoLg9kDgX9wEg6qKWL7IWtLpgdsbEYlPcyEHO1Cs3ioXbJJpDyH+B8Do5p6nAye7AAAAAElFTkSuQmCC"
+$stylered = "<style>#redtext td {color:red}</style>"
+$styleblack = "<style>#blacktext td {color:black}</style>"
+$weekDate = Get-Date -Format yyyyMMdd
+$outfile = "summary_"+$weekDate+".html"
+
+#Enable printer operational log
+$logName = 'Microsoft-Windows-PrintService/Operational'
+$log = New-Object System.Diagnostics.Eventing.Reader.EventLogConfiguration $logName
+$log.IsEnabled=$true
+$log.SaveChanges()
+
+#Don't throw any errors if the HTML summary file doesn't already exist
+try {Remove-Item $outfile -ErrorAction "Stop"}
+catch {}
+
+#Parsing for cmd switches
+If($List) { $Computers = Get-Content -path $list; Test-ComputerConnection; exit }
+If($Localhost) { $Computers = $env:computername; Test-ComputerConnection; exit }
+If($Computers) 
+  { 
+   if($Computers.Contains(",")) {$Computers = $Computers.Split(",")} 
+   Test-ComputerConnection; exit 
+  }
+If($help) { Get-HelpText; exit }
+$Computers = $env:computername; Test-ComputerConnection; exit
