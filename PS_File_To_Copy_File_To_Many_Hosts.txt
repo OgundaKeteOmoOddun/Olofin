@@ -1,0 +1,4 @@
+$server_names = Get-Content "C:\Servers_list.txt"
+Foreach ($server in $server_names){
+             Copy-Item "C:\Test_CopyItem" -Destination "\\$server\C$" -Recurse
+}

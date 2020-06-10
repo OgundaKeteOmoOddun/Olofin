@@ -1,0 +1,1 @@
+Copy-Item "C:\Software\EMC\Networker\NWVSS.exe -Destination \\vs11app01\c$\temp
