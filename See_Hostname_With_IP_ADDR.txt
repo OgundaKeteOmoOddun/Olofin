@@ -1,0 +1,5 @@
+hostname -i
+
+or
+
+hostname -I
